@@ -51,6 +51,17 @@ class XhsVideoStreamTest(unittest.TestCase):
 
         self.assertEqual(aw.medias[0].url, "https://cdn.test/ef4-1080.mp4")
 
+    def test_browser_decamelized_stream_keys_are_supported(self):
+        """浏览器 SSR 的 EF4 曾被 _decamel 改成 e_f4，解析层也要兜住。"""
+        aw = parse_note_detail(_video_card({
+            "e_f4": [{"master_url": "https://cdn.test/browser-ef4.mp4",
+                      "width": 720, "height": 1280}],
+            "e_f5": [{"master_url": "https://cdn.test/browser-ef5.mp4",
+                      "width": 1080, "height": 1920}],
+        }), {})
+
+        self.assertEqual(aw.medias[0].url, "https://cdn.test/browser-ef4.mp4")
+
     def test_legacy_h264_and_backup_url_are_supported(self):
         aw = parse_note_detail(_video_card({
             "h264": [{"backup_urls": ["https://cdn.test/legacy-h264.mp4"]}],

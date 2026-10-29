@@ -12,6 +12,7 @@ from app.browser.xhs_fetcher import (
     FAVORITE_ALL_API,
     FAVORITE_BOARDS_API,
     _favorite_notes,
+    _decamel,
     _xhs_page_failure,
     _xhs_search_value,
     fetch_xhs_search,
@@ -66,6 +67,23 @@ class _Manager:
 
 
 class XhsFetcherResponseTests(unittest.TestCase):
+    def test_decamel_preserves_acronym_stream_keys(self):
+        card = _decamel({
+            "noteId": "note-1",
+            "video": {"media": {"stream": {
+                "EF4": [{"masterUrl": "https://cdn.test/ef4.mp4"}],
+                "HDR_type": 0,
+            }}},
+        })
+
+        self.assertEqual(card["note_id"], "note-1")
+        self.assertIn("EF4", card["video"]["media"]["stream"])
+        self.assertIn("HDR_type", card["video"]["media"]["stream"])
+        self.assertEqual(
+            card["video"]["media"]["stream"]["EF4"][0]["master_url"],
+            "https://cdn.test/ef4.mp4",
+        )
+
     def test_favorite_response_shapes_are_normalized(self):
         self.assertEqual(_favorite_notes({"notes": [{"note_id": "n1"}]}),
                          [{"note_id": "n1"}])

@@ -115,10 +115,16 @@ _VIDEO_STREAM_CODEC_PRIORITY = (
 )
 
 
+def _stream_key(value) -> str:
+    """归一化流档位键名：EF4 / e_f4 / ef-4 在页面与接口中可能混用。"""
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
 def _stream_variants(stream: dict, codec: str) -> list[dict]:
     """取某个编码档位下的所有清晰度；兼容 list/单个 dict 两种结构。"""
+    wanted = _stream_key(codec)
     for key, value in (stream or {}).items():
-        if str(key).lower() != codec:
+        if _stream_key(key) != wanted:
             continue
         if isinstance(value, dict):
             return [value]

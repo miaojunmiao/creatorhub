@@ -75,10 +75,19 @@ def _profile_url(user_id: str, xsec_token: str = "", xsec_source: str = "") -> s
 
 def _decamel(obj):
     """SSR 的 __INITIAL_STATE__ 键是 camelCase(noteCard/displayTitle),
-    统一转成接口同款 snake_case,让下游归一函数两种来源通吃。"""
+    统一转成接口同款 snake_case,让下游归一函数两种来源通吃。
+
+    ``EF4``/``HDR_type`` 这类全大写缩写不是 camelCase，不能拆成 ``e_f4``，
+    否则视频流的编码档位键会被破坏。
+    """
     if isinstance(obj, dict):
-        return {re.sub(r"(?<!^)(?=[A-Z])", "_", k).lower(): _decamel(v)
-                for k, v in obj.items()}
+        result = {}
+        for key, value in obj.items():
+            normalized = key
+            if isinstance(key, str) and key[:1].islower():
+                normalized = re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()
+            result[normalized] = _decamel(value)
+        return result
     if isinstance(obj, list):
         return [_decamel(x) for x in obj]
     return obj
