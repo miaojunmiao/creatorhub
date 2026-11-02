@@ -728,6 +728,9 @@ main :is(.publish-permissions, .monitor-config-group) {
   /* Keep the original mark visible, without shrinking touch controls. */
   .brand-copy { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
 }
+.duration-range { flex-wrap:nowrap; max-width:440px; gap:10px; }
+.duration-range input { width:0; flex:1; min-width:0; }
+
 /* Keep animation names for Radix Presence: a near-zero duration still delivers
    exit completion when the OS preference changes in the middle of an exit. */
 

@@ -326,22 +326,30 @@ def test_deleted_or_invalid_accounts_are_removed_from_pending_checks(health):
     assert not health.engine._pending_account_checks
 
 
-def test_health_rechecks_account_lock_after_waiting_for_network_slot(health, monkeypatch):
+def test_health_reserves_account_before_waiting_for_network_slot(health, monkeypatch):
     lock = health.project.browser.lock_for(f"acc:{health.account_id}")
+    manual_window = None
+    opened = asyncio.Event()
+
+    async def open_window():
+        async with lock:
+            opened.set()
 
     @asynccontextmanager
     async def network_guard(_account):
-        await lock.acquire()  # A manual window won the Profile while we waited.
-        try:
-            yield
-        finally:
-            lock.release()
+        nonlocal manual_window
+        manual_window = asyncio.create_task(open_window())
+        await asyncio.sleep(0)
+        assert not opened.is_set()  # The probe already owns its Profile.
+        yield
 
     monkeypatch.setattr(health.engine.risk, "network_guard", network_guard)
 
     async def run():
         result = await asyncio.wait_for(health.engine._probe_account_health(probe(health)), timeout=1)
-        assert result["deferred"] and result["reason"] == "account_busy"
-        health.client.fetch_self_profile.assert_not_awaited()
+        assert not result.get("deferred")
+        health.client.fetch_self_profile.assert_awaited_once()
+        await asyncio.wait_for(manual_window, timeout=1)
+        assert opened.is_set()
 
     asyncio.run(run())

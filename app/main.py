@@ -5550,6 +5550,33 @@ async def ai_test(body: AiTestIn):
         return {"ok": False, "error": f"{msg}(检查 Base URL / Key / 模型 / 网络/代理)"}
 
 
+class AiCopyIn(BaseModel):
+    template: str = PydanticField(min_length=1, max_length=10000)
+    instructions: str = PydanticField(default="", max_length=2000)
+    allow_emoji: bool = True
+    previous_text: str = PydanticField(default="", max_length=12000)
+
+
+@app.post("/api/ai/copy")
+async def generate_ai_copy(body: AiCopyIn):
+    from .engine import compose
+    if not body.template.strip():
+        raise HTTPException(400, "请先填写参考文案模板")
+    ai = {"base_url": get_setting("ai_base_url", ""),
+          "api_key": get_setting("ai_api_key", ""),
+          "model": get_setting("ai_model", ""),
+          "temperature": get_setting("ai_temperature", "0.9")}
+    if not all(ai[field].strip() for field in ("base_url", "api_key", "model")):
+        raise HTTPException(400, "请先在 AI 文案的「模型配置」中保存接口地址、模型和 API Key")
+    try:
+        text = await compose.generate_copy(
+            body.template.strip(), body.instructions.strip(), body.allow_emoji,
+            body.previous_text, ai)
+    except Exception:
+        raise HTTPException(502, "AI 文案生成失败，请检查模型配置、网络或稍后重试；上一版文案已保留") from None
+    return {"text": text}
+
+
 # ─────────── 通用分享链接下载 ───────────
 class ShareLinksIn(BaseModel):
     share_text: str
@@ -6703,6 +6730,8 @@ class KeywordCollectionIn(BaseModel):
     search_sort: str = "general"
     publish_time: str = "all"
     content_type: str = "all"
+    min_duration: StrictInt = 0
+    max_duration: StrictInt = 0
     min_likes: int = 0
     min_comments: int = 0
     max_comments_per_content: int = 20
@@ -6769,6 +6798,15 @@ def _validated_collection_input(body: KeywordCollectionIn) \
     content_type = body.content_type.strip().lower()
     if content_type not in {"all", "video", "images"}:
         raise HTTPException(400, "内容类型筛选值无效")
+    if not (0 <= body.min_duration <= 86400 and 0 <= body.max_duration <= 86400):
+        raise HTTPException(400, "视频时长须为 0~86400 秒的整数，0 表示不限")
+    if body.max_duration and body.min_duration > body.max_duration:
+        raise HTTPException(400, "视频时长下限不能大于上限")
+    if body.min_duration or body.max_duration:
+        if platform not in {"douyin", "xhs"}:
+            raise HTTPException(400, "视频时长筛选目前仅支持抖音和小红书")
+        if content_type == "images":
+            raise HTTPException(400, "图文不能设置视频时长范围，请选择视频或全部作品")
     if not 0 <= body.min_likes <= 2_000_000_000:
         raise HTTPException(400, "最低点赞数须为非负整数")
     if not 0 <= body.min_comments <= 2_000_000_000:
@@ -6793,6 +6831,8 @@ def _validated_collection_input(body: KeywordCollectionIn) \
         "search_sort": search_sort,
         "publish_time": publish_time,
         "content_type": content_type,
+        "min_duration": body.min_duration,
+        "max_duration": body.max_duration,
         "min_likes": body.min_likes,
         "min_comments": body.min_comments,
     }
@@ -6869,6 +6909,8 @@ def _collection_job_dict(job: KeywordCollectionJob) -> dict:
         "search_sort": job.search_sort,
         "publish_time": job.publish_time,
         "content_type": job.content_type,
+        "min_duration": job.min_duration,
+        "max_duration": job.max_duration,
         "min_likes": job.min_likes,
         "min_comments": job.min_comments,
         "max_comments_per_content": job.max_comments_per_content,
@@ -6887,6 +6929,9 @@ def _collection_job_dict(job: KeywordCollectionJob) -> dict:
         "planned_content_count": planned, "error_count": job.error_count,
         "error": _collection_error_for_display(job.error),
         "error_detail": job.error,
+        "blocked_reason": job.blocked_reason,
+        "blocked_signal": job.blocked_signal,
+        "next_allowed_at": utc_iso(job.next_allowed_at),
         "cancel_requested": job.cancel_requested,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "started_at": job.started_at.isoformat() if job.started_at else None,
@@ -6989,6 +7034,7 @@ def _collection_content_dict(row: KeywordCollectionContent) -> dict:
         "cover_url": row.cover_url, "like_count": row.like_count,
         "comment_count": row.comment_count,
         "collected_comment_count": row.collected_comment_count,
+        "duration": row.duration,
         "download_status": row.download_status, "local_path": row.local_path,
         "xsec_token": row.xsec_token, "xsec_source": row.xsec_source,
         "error": row.error, "url": url,

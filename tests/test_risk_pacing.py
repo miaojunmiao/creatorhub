@@ -191,6 +191,7 @@ def test_interactive_read_rechecks_risk_after_waiting_for_account_lock(paced):
 
 @pytest.mark.parametrize("creator_only,available", [(False, True), (True, True), (False, False)])
 def test_background_health_respects_browser_read_mode(paced, monkeypatch, creator_only, available):
+    paced.cfg.engine.xhs_read_mode = "browser"
     browser = paced.project.browser
     if available:
         browser.visible_page = AsyncMock(side_effect=AssertionError("use profile stub"))

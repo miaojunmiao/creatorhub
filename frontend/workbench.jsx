@@ -66,7 +66,8 @@ for (const key of ["monitors", "comments", "danmaku"]) {
 // Configuration is progressively disclosed; the search/record tools stay first.
 const groupSpecs = {
   accounts: [["accounts", "账号列表"], ["inbox", "聚合私信", ["douyin", "xhs", "kuaishou"]], ["runtime", "浏览器内核"], ["proxies", "代理池"]],
-  settings: [["appearance", "外观与体验"], ["downloads", "下载设置"], ["ai", "AI 文案"], ["engine", "采集与运行"]],
+  settings: [["appearance", "外观与体验"], ["downloads", "下载设置"], ["engine", "采集与运行"]],
+  "ai-copy": [["generate", "生成文案"], ["config", "模型配置"]],
   monitors: [["targets", "监控目标"], ["records", "作品记录"]],
   comments: [["targets", "监控目标"], ["records", "评论记录"]],
   danmaku: [["targets", "监控目标"], ["records", "弹幕记录"]],
@@ -268,7 +269,7 @@ let readSerial = 0;
 const prefixes = { overview: ["/api/overview", "/api/stats", "/api/task-queue"], accounts: ["/api/accounts", "/api/browser-runtimes", "/api/proxies"],
   monitors: ["/api/monitors", "/api/contents"], comments: ["/api/comment-watches", "/api/comments"], danmaku: ["/api/danmaku"],
   collections: ["/api/collections"], queue: ["/api/task-queue"], publish: ["/api/publish"], autocomment: ["/api/comment-rules", "/api/comment-tasks"],
-  settings: ["/api/settings"], notifications: ["/api/notifications"], "risk-control": ["/api/risk"], hub: ["/api/accounts", "/api/hub"] };
+  settings: ["/api/settings"], "ai-copy": ["/api/settings"], notifications: ["/api/notifications"], "risk-control": ["/api/risk"], hub: ["/api/accounts", "/api/hub"] };
 let menuOpen = false, sheetOpen = false;
 let lastContext = context();
 const drafts = new Map();

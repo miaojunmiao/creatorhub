@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import List, Optional
 
@@ -33,6 +34,31 @@ def _num(v) -> int:
 
 
 # ── 列表项(user_posted / search 的精简卡片) ──
+def _video_duration(card: dict) -> float:
+    """视频流 duration 为毫秒，优先保留精度；basic/capa 等摘要为秒。"""
+    video = card.get("video") or {}
+    media = video.get("media") or {}
+    for variants in (media.get("stream") or {}).values():
+        for stream in ([variants] if isinstance(variants, dict) else variants or []):
+            if not isinstance(stream, dict):
+                continue
+            try:
+                milliseconds = float(stream.get("duration") or 0)
+                if math.isfinite(milliseconds) and milliseconds > 0:
+                    return milliseconds / 1000
+            except (TypeError, ValueError):
+                continue
+    for part in (media.get("basic") or {}, video.get("basic") or {}, video.get("capa") or {},
+                 video.get("consumer") or {}, video):
+        try:
+            seconds = float(part.get("duration") or 0)
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def parse_note_brief(item: dict) -> Optional[dict]:
     """Read a note card, preserving its token/source pair across list shapes."""
     if not isinstance(item, dict):
@@ -88,6 +114,7 @@ def parse_note_brief(item: dict) -> Optional[dict]:
         "title": _first(card, "display_title", "title", "desc", default="") or "",
         "cover": cov_url,
         "create_time": create_time,
+        "duration": _video_duration(card) if card.get("type") == "video" else 0,
         "author_name": _first(user, "nickname", "nick_name", "name", default="") or "",
         "author_id": str(_first(user, "user_id", "userId", "id", default="") or ""),
     }
@@ -218,6 +245,7 @@ def parse_note_detail(note_card: dict, brief: dict | None = None) -> Optional[Aw
     aw.comment_count = _num(_first(interact, "comment_count", "commentCount", default=0))
 
     if ntype == "video":
+        aw.duration = _video_duration(note_card) or (brief or {}).get("duration", 0)
         url = _video_url(note_card)
         if url:
             aw.medias.append(MediaItem(url=url, kind="video", ext="mp4", index=0))

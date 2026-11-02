@@ -196,6 +196,153 @@ class SearchExtractionTests(unittest.TestCase):
 
 
 class DouyinPageSearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_challenges_share_a_budget_and_keep_partial_result_error(self):
+        response = SimpleNamespace(
+            status=200,
+            url="https://www.douyin.com/aweme/v1/web/general/search/single/",
+        )
+        verify = {"data": [], "search_nil_info": {"search_nil_type": "verify_check"}}
+        response.json = AsyncMock(return_value=verify)
+        page = SimpleNamespace(
+            url="about:blank", on=MagicMock(),
+            wait_for_load_state=AsyncMock(), bring_to_front=AsyncMock(),
+            close=AsyncMock(), evaluate=AsyncMock(),
+        )
+        verification_waits = 0
+
+        async def emit(payload):
+            response.json.return_value = payload
+            await page.on.call_args.args[1](response)
+
+        async def goto(url, **_kwargs):
+            page.url = url
+            await emit(verify)
+
+        async def wait(milliseconds):
+            nonlocal verification_waits
+            if milliseconds == 1000:
+                verification_waits += 1
+                if verification_waits == 1:
+                    await emit({"data": [{"aweme_info": {
+                        "aweme_id": "partial-result", "video": {"play_addr": {}},
+                    }}]})
+
+        async def wheel(*_args):
+            await emit(verify)
+
+        page.goto, page.wait_for_timeout = goto, wait
+        page.mouse = SimpleNamespace(wheel=AsyncMock(side_effect=wheel))
+        rows, error = await fetch_douyin_search(
+            SimpleNamespace(), SimpleNamespace(), "露营", max_results=10,
+            captcha_wait_seconds=3, context=SimpleNamespace(pages=[page]),
+        )
+        self.assertEqual([row["aweme_id"] for row in rows], ["partial-result"])
+        self.assertIn("请完成验证", error)
+        self.assertEqual(verification_waits, 3)
+        page.mouse.wheel.assert_awaited_once()
+        page.close.assert_awaited_once()
+
+    async def test_empty_search_stops_at_stagnant_limit(self):
+        page = SimpleNamespace(
+            url="about:blank", on=MagicMock(), goto=AsyncMock(),
+            wait_for_load_state=AsyncMock(), wait_for_timeout=AsyncMock(),
+            close=AsyncMock(), evaluate=AsyncMock(),
+            title=AsyncMock(return_value="抖音搜索"),
+            locator=MagicMock(return_value=SimpleNamespace(inner_text=AsyncMock(return_value=""))),
+            mouse=SimpleNamespace(wheel=AsyncMock()),
+        )
+        with patch("app.browser.fetcher._submit_douyin_search", AsyncMock(return_value=False)):
+            rows, error = await fetch_douyin_search(
+                SimpleNamespace(), SimpleNamespace(), "露营", max_scrolls=40,
+                stagnant_limit=2, context=SimpleNamespace(pages=[page]),
+            )
+        self.assertEqual(rows, [])
+        self.assertTrue(error)
+        self.assertEqual(page.mouse.wheel.await_count, 2)
+        page.wait_for_load_state.assert_not_awaited()
+
+    async def test_cancel_during_verification_stops_without_scrolling(self):
+        progress = []
+        canceled = False
+        response = SimpleNamespace(
+            status=200,
+            url="https://www.douyin.com/aweme/v1/web/general/search/single/",
+            json=AsyncMock(return_value={
+                "data": [], "search_nil_info": {"search_nil_type": "verify_check"},
+            }),
+        )
+        page = SimpleNamespace(
+            url="about:blank", on=MagicMock(),
+            wait_for_load_state=AsyncMock(), bring_to_front=AsyncMock(),
+            close=AsyncMock(), mouse=SimpleNamespace(wheel=AsyncMock()),
+        )
+
+        async def goto(url, **_kwargs):
+            page.url = url
+            await page.on.call_args.args[1](response)
+
+        async def wait(milliseconds):
+            nonlocal canceled
+            if milliseconds == 1000:
+                canceled = True
+
+        page.goto = goto
+        page.wait_for_timeout = wait
+        rows, error = await fetch_douyin_search(
+            SimpleNamespace(), SimpleNamespace(), "露营",
+            context=SimpleNamespace(pages=[page]),
+            on_progress=progress.append, cancel_requested=lambda: canceled,
+        )
+        self.assertEqual((rows, error), ([], ""))
+        self.assertTrue(any("等待人工" in step for step in progress))
+        page.close.assert_awaited_once()
+        page.mouse.wheel.assert_not_awaited()
+
+    async def test_verification_recovery_with_filtered_results_does_not_keep_waiting(self):
+        progress = []
+        response = SimpleNamespace(
+            status=200,
+            url="https://www.douyin.com/aweme/v1/web/general/search/single/",
+        )
+        response.json = AsyncMock(return_value={
+            "data": [], "search_nil_info": {"search_nil_type": "verify_check"},
+        })
+        page = SimpleNamespace(
+            url="about:blank", on=MagicMock(),
+            wait_for_load_state=AsyncMock(), bring_to_front=AsyncMock(),
+            close=AsyncMock(), mouse=SimpleNamespace(wheel=AsyncMock()),
+            evaluate=AsyncMock(), title=AsyncMock(return_value="抖音搜索"),
+            locator=MagicMock(return_value=SimpleNamespace(inner_text=AsyncMock(return_value=""))),
+        )
+        verification_waits = 0
+
+        async def goto(url, **_kwargs):
+            page.url = url
+            await page.on.call_args.args[1](response)
+
+        async def wait(milliseconds):
+            nonlocal verification_waits
+            if milliseconds == 1000:
+                verification_waits += 1
+                response.json.return_value = {"data": [{"aweme_info": {
+                    "aweme_id": "filtered", "video": {"play_addr": {}},
+                    "statistics": {"digg_count": 1},
+                }}]}
+                await page.on.call_args.args[1](response)
+
+        page.goto = goto
+        page.wait_for_timeout = wait
+        with patch("app.browser.fetcher._submit_douyin_search", AsyncMock(return_value=False)):
+            rows, error = await fetch_douyin_search(
+                SimpleNamespace(), SimpleNamespace(), "露营", min_likes=100,
+                captcha_wait_seconds=5, max_scrolls=2,
+                context=SimpleNamespace(pages=[page]), on_progress=progress.append,
+            )
+        self.assertEqual(rows, [])
+        self.assertIn("没有符合条件", error)
+        self.assertNotIn("请完成验证", error)
+        self.assertEqual(verification_waits, 1)
+
     async def test_stream_response_body_is_decoded_and_collected(self):
         payload = json.dumps({"data": [{"aweme_info": {
             "aweme_id": "stream-result-1",
@@ -420,6 +567,39 @@ class KeywordCollectionPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job.comment_count, 2)
         self.assertEqual(headed_calls, [])
 
+    async def test_browser_search_persists_verification_progress_and_checks_cancellation(self):
+        context = SimpleNamespace()
+
+        @asynccontextmanager
+        async def headed(_identity):
+            yield context
+
+        cfg = Config()
+        cfg.engine.douyin_read_mode = "browser"
+        browser = SimpleNamespace(
+            identity_for=lambda _account: SimpleNamespace(ua="fixture-agent"),
+            temporary_headed_context=headed,
+        )
+        collector = KeywordCollector(cfg, browser, SimpleNamespace())
+
+        async def search(*_args, **kwargs):
+            self.assertIs(kwargs["context"], context)
+            self.assertFalse(kwargs["cancel_requested"]())
+            kwargs["on_progress"]("等待人工完成抖音验证（剩余 300 秒）")
+            with db.get_session() as session:
+                job = session.get(KeywordCollectionJob, self.job_id)
+                self.assertIn("等待人工", job.current_step)
+                job.cancel_requested = True
+                session.add(job)
+                session.commit()
+            self.assertTrue(kwargs["cancel_requested"]())
+            return [], ""
+
+        with patch("app.engine.collection.fetch_douyin_search", side_effect=search) as fetch:
+            result = await collector.run(self.job_id, self.account)
+        fetch.assert_awaited_once()
+        self.assertEqual(result["errors"], 0)
+
     async def test_api_mode_does_not_create_a_headed_browser_context(self):
         raw_aweme = {
             "aweme_id": "api-aweme-1",
@@ -507,6 +687,8 @@ class KeywordCollectionPipelineTests(unittest.IsolatedAsyncioTestCase):
             content_type="all",
             min_likes=0,
             min_comments=0,
+            min_duration=0,
+            max_duration=0,
         )
         browser_fetch = AsyncMock(side_effect=AssertionError(
             "verification_required must not fall back to browser search"))
@@ -538,7 +720,7 @@ class KeywordCollectionPipelineTests(unittest.IsolatedAsyncioTestCase):
         job = SimpleNamespace(
             max_contents_per_keyword=3, max_pages_per_keyword=2, stagnant_pages=1,
             search_sort="general", publish_time="all", content_type="all",
-            min_likes=0, min_comments=0)
+            min_likes=0, min_comments=0, min_duration=0, max_duration=0)
         browser_rows = [{"aweme_id": "browser-compat-result"}]
         browser_fetch = AsyncMock(return_value=(browser_rows, ""))
 
@@ -562,7 +744,7 @@ class KeywordCollectionPipelineTests(unittest.IsolatedAsyncioTestCase):
         job = SimpleNamespace(
             max_contents_per_keyword=3, max_pages_per_keyword=2, stagnant_pages=1,
             search_sort="general", publish_time="all", content_type="all",
-            min_likes=0, min_comments=0)
+            min_likes=0, min_comments=0, min_duration=0, max_duration=0)
         browser_rows = [{"aweme_id": "browser-exception-result"}]
         browser_fetch = AsyncMock(return_value=(browser_rows, ""))
 

@@ -403,7 +403,7 @@ def test_workbench_motion_interruptions_markers_and_mobile(ui):
       return Math.abs(a.left-b.left) < 1 && Math.abs(a.width-b.width) < 1;
     }""")
     page.get_by_role("tab", name="下载设置", exact=True).click()
-    page.get_by_role("tab", name="AI 文案", exact=True).click()
+    page.get_by_role("tab", name="采集与运行", exact=True).click()
     page.get_by_role("tab", name="外观与体验", exact=True).click()
     page.wait_for_timeout(260)
     assert page.locator('[data-panel="settings"] .wb-tablist').evaluate("""el => {
@@ -668,7 +668,8 @@ def test_preference_persistence_system_and_keyboard(ui):
     assert page.locator("html").get_attribute("data-motion") == "reduced"
     assert page.locator("html").get_attribute("data-theme") == "light"
     # Validation is associated with its field and clears without losing helper IDs.
-    page.get_by_role("tab", name="AI 文案", exact=True).click()
+    navigate(page, "ai-copy")
+    page.get_by_role("tab", name="模型配置", exact=True).click()
     page.locator("#ai-base").fill("invalid-url")
     page.locator("#ai-model").focus()
     assert page.locator("#ai-base").get_attribute("aria-describedby") == "ai-base-error"

@@ -28,9 +28,18 @@ class Aweme:
     quality_label: str = ""     # 实际选中的画质,如 "1080p"
     like_count: int = 0
     comment_count: int = 0
-    duration: int = 0           # 秒
+    duration: float = 0         # 秒，保留毫秒精度以准确判断范围边界
     avatar: str = ""            # 作者头像
     platform: str = "douyin"    # douyin | xhs(决定下载时的 Referer)
+
+
+def video_duration_matches(media_type: str, duration: float,
+                           minimum: int = 0, maximum: int = 0) -> bool:
+    """启用时长筛选时，仅接受时长已知且处于闭区间内的视频。"""
+    if not (minimum or maximum):
+        return True
+    return (media_type == "video" and duration > 0
+            and duration >= minimum and (not maximum or duration <= maximum))
 
 
 def _first_http(urls) -> Optional[str]:
@@ -102,7 +111,7 @@ def parse_aweme(item: dict, quality: str = "highest") -> Optional[Aweme]:
     aw.like_count = int(stats.get("digg_count") or 0)
     aw.comment_count = int(stats.get("comment_count") or 0)
     dur_ms = (item.get("video") or {}).get("duration") or 0
-    aw.duration = int(dur_ms / 1000) if dur_ms else 0
+    aw.duration = float(dur_ms) / 1000 if dur_ms else 0
 
     # 封面
     cover = (item.get("video") or {}).get("cover") or {}

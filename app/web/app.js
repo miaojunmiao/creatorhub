@@ -1080,11 +1080,14 @@ const PAGE_META = {
   "share-download": {
     title: "链接下载", desc: "从分享文案识别链接，检查媒体信息并下载到本地。"
   },
+  "ai-copy": {
+    title: "AI 文案", desc: "提供参考模板生成新文案，支持表情和重新生成。"
+  },
   notifications: {
     title: "通知渠道", desc: "配置 Bark、钉钉或 Telegram，及时接收任务提醒。"
   },
   settings: {
-    title: "设置", desc: "管理外观、下载、AI 文案与采集运行配置。"
+    title: "设置", desc: "管理外观、下载与采集运行配置。"
   },
 };
 function updatePageContext(name = CURRENT_TAB) {
@@ -1464,6 +1467,7 @@ function switchTab(name, pushHistory = false) {
     refreshShareHistory();
   }
   if (name === "collections") { populateCollectionAccount(); refreshCollections(); }
+  if (name === "ai-copy") loadSettings();
   if (name === "queue") refreshTaskQueue();
   if (name === "risk-control") refreshRiskCenter();
   if (changed && !["hub", "share-download", "collections", "queue", "risk-control"].includes(name)) loop();
@@ -4461,6 +4465,61 @@ async function testAi() {
     } catch (e) { $("ai-msg").textContent = "失败:" + e.message; toast("测试失败:" + e.message, "err"); }
   });
 }
+const AI_COPY_PRESETS = {
+  recommend: "最近发现的宝藏好物 ✨\n真的忍不住想和你们分享！\n💡 最打动我的三个细节：\n① 使用起来很顺手\n② 解决了日常的小困扰\n③ 细节比预期更贴心\n适合有同样需求的朋友参考，先按自己的实际情况选择～\n你们还有什么好物推荐？评论区聊聊 💬",
+  guide: "新手也能上手的实用攻略 📝\n刚开始的时候，我也踩过不少坑。把有用的经验整理给你：\n✅ 第一步：先明确自己的需求\n✅ 第二步：从简单的方法开始尝试\n✅ 第三步：记录结果，慢慢调整\n不用一步到位，找到适合自己的节奏就好。\n先收藏，下次需要时再翻出来看 ✨",
+  daily: "把今天的小美好存档 🌿\n偶尔慢下来，才发现平凡日子也有很多值得记录的瞬间。\n一件小事、一段风景，都让我心情好了不少。\n希望你今天也有属于自己的小确幸 ☀️\n最近有什么让你开心的事？",
+};
+let AI_COPY_BUSY = false;
+function applyAiCopyPreset() {
+  const text = AI_COPY_PRESETS[$("ai-copy-preset").value];
+  if (text) { $("ai-copy-template").value = text; setFieldError($("ai-copy-template"), ""); }
+}
+function updateAiCopyActions() {
+  const hasResult = !!$("ai-copy-result").value.trim();
+  $("ai-copy-generate").disabled = AI_COPY_BUSY;
+  $("ai-copy-refresh").disabled = AI_COPY_BUSY || !hasResult;
+  $("ai-copy-copy").disabled = !hasResult;
+}
+async function generateAiCopy(refresh = false) {
+  if (AI_COPY_BUSY) return;
+  const template = $("ai-copy-template").value.trim();
+  if (!setFieldError($("ai-copy-template"), template ? "" : "请填写参考文案模板")) {
+    $("ai-copy-template").focus(); return;
+  }
+  const body = { template, instructions: $("ai-copy-instructions").value.trim(),
+    allow_emoji: $("ai-copy-emoji").checked,
+    previous_text: refresh ? $("ai-copy-result").value.slice(0, 12000) : "" };
+  AI_COPY_BUSY = true;
+  updateAiCopyActions();
+  const button = refresh ? $("ai-copy-refresh") : $("ai-copy-generate");
+  button.setAttribute("aria-busy", "true");
+  $("ai-copy-result").readOnly = true;
+  $("ai-copy-msg").textContent = refresh ? "正在重新生成…" : "正在生成文案…";
+  try {
+    const result = await api("/api/ai/copy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    $("ai-copy-result").value = result.text;
+    $("ai-copy-msg").textContent = refresh ? "已重新生成，可编辑或复制。" : "文案已生成，可编辑、复制或重新生成。";
+  } catch (error) {
+    $("ai-copy-msg").textContent = error.message + ($("ai-copy-result").value ? "；上一版文案已保留。" : "");
+    toast("生成失败：" + error.message, "err");
+  } finally {
+    AI_COPY_BUSY = false;
+    button.removeAttribute("aria-busy");
+    $("ai-copy-result").readOnly = false;
+    updateAiCopyActions();
+  }
+}
+async function copyAiCopy() {
+  try {
+    await navigator.clipboard.writeText($("ai-copy-result").value);
+    $("ai-copy-msg").textContent = "文案已复制，表情和换行已保留。";
+    toast("文案已复制", "ok");
+  } catch (error) {
+    $("ai-copy-result").focus(); $("ai-copy-result").select();
+    $("ai-copy-msg").textContent = "无法自动复制，已选中文案，请手动复制。";
+  }
+}
 async function saveSettings() {
   $("dl-msg").textContent = "保存中…";
   await withBusy(evtBtn(), "保存中", async () => {
@@ -5214,6 +5273,7 @@ function applyCollectionForm() {
   if ($("col-dir-wrap")) $("col-dir-wrap").style.display = enabled ? "" : "none";
   const xhs = PLATFORM === "xhs";
   const channels = PLATFORM === "shipinhao";
+  if ($("col-duration-wrap")) $("col-duration-wrap").hidden = !["douyin", "xhs"].includes(PLATFORM);
   const platformName = PF_NAME[PLATFORM] || "平台";
   document.querySelectorAll("#col-source [data-xhs-source]").forEach(option => { option.disabled = !xhs; option.hidden = !xhs; });
   document.querySelectorAll("#col-source option:not([data-xhs-source]):not([data-channels-source])").forEach(option => { option.disabled = channels; option.hidden = channels; });
@@ -5266,6 +5326,12 @@ function collectionDate(value) {
   const parsed = new Date(value.endsWith && value.endsWith("Z") ? value : value + "Z");
   return Number.isNaN(parsed.getTime()) ? esc(value) : parsed.toLocaleString();
 }
+function durationRangeError(minimum, maximum, contentType) {
+  if (![minimum, maximum].every(value => Number.isInteger(value) && value >= 0 && value <= 86400)) return "视频时长须为 0–86400 的整数秒数";
+  if (maximum && minimum > maximum) return "视频时长下限不能大于上限";
+  if ((minimum || maximum) && contentType === "images") return "时长范围只适用于视频，请选择视频或全部作品";
+  return "";
+}
 async function createCollection() {
   const keywords = collectionKeywords();
   const sourceType = PLATFORM === "shipinhao" ? "account_works" : collectionSourceValue();
@@ -5279,6 +5345,9 @@ async function createCollection() {
   const stagnantPages = Number($("col-stagnant-pages").value || 0);
   const minLikes = Number($("col-min-likes").value || 0);
   const minComments = Number($("col-min-comments").value || 0);
+  const durationEnabled = ["douyin", "xhs"].includes(PLATFORM);
+  const minDuration = durationEnabled ? Number($("col-min-duration").value || 0) : 0;
+  const maxDuration = durationEnabled ? Number($("col-max-duration").value || 0) : 0;
   let valid = true;
   valid = setFieldError($("col-keywords"), sourceType === "keyword" && !keywords.length ? "请至少填写一个关键词" : keywords.length > 20 ? "单个任务最多 20 个关键词" : "") && valid;
   if (sourceType === "favorite_board") valid = setFieldError(board, !sourceRef ? "请选择收藏夹" : "") && valid;
@@ -5290,6 +5359,8 @@ async function createCollection() {
   valid = setFieldError($("col-stagnant-pages"), stagnantPages < 1 || stagnantPages > 8 ? "请输入 1–8" : "") && valid;
   valid = setFieldError($("col-min-likes"), minLikes < 0 ? "请输入非负整数" : "") && valid;
   valid = setFieldError($("col-min-comments"), minComments < 0 ? "请输入非负整数" : "") && valid;
+  valid = setFieldError($("col-min-duration"), durationRangeError(minDuration, maxDuration, $("col-content-type").value)) && valid;
+  valid = setFieldError($("col-max-duration"), !Number.isInteger(maxDuration) || maxDuration < 0 || maxDuration > 86400 ? "请输入 0–86400 的整数秒数" : "") && valid;
   if (!valid) {
     const form = $("col-keywords").closest(".card");
     const first = form?.querySelector('[aria-invalid="true"]');
@@ -5312,6 +5383,8 @@ async function createCollection() {
           content_type: $("col-content-type").value || "all",
           min_likes: minLikes,
           min_comments: minComments,
+          min_duration: minDuration,
+          max_duration: maxDuration,
           max_comments_per_content: commentLimit,
           include_replies: $("col-replies").checked,
           download_media: $("col-download").checked,
@@ -5369,7 +5442,8 @@ function renderCollectionJobs() {
     const sortLabel = { general: "综合", latest: "最新", most_liked: "最多点赞" }[job.search_sort] || "综合";
     const timeLabel = { all: "不限时间", day: "一天内", week: "一周内", half_year: "半年内" }[job.publish_time] || "不限时间";
     const typeLabel = { all: "全部类型", video: "视频", images: "图文" }[job.content_type] || "全部类型";
-    const threshold = [Number(job.min_likes) > 0 ? `≥${fmtNum(job.min_likes)} 赞` : "", Number(job.min_comments) > 0 ? `≥${fmtNum(job.min_comments)} 评` : ""].filter(Boolean).join(" · ");
+    const durationLabel = job.min_duration || job.max_duration ? `视频 ${job.min_duration || 0}～${job.max_duration || "不限"} 秒` : "";
+    const threshold = [Number(job.min_likes) > 0 ? `≥${fmtNum(job.min_likes)} 赞` : "", Number(job.min_comments) > 0 ? `≥${fmtNum(job.min_comments)} 评` : "", durationLabel].filter(Boolean).join(" · ");
     return `<article class="collection-task" role="listitem" aria-label="任务 ${job.id}，${status.label}">
       <div class="collection-task-meta"><div><span class="collection-task-label">任务状态</span><span class="pill ${status.cls}">${status.label}</span></div><time class="collection-task-created" datetime="${esc(job.created_at || "")}">${collectionDate(job.created_at)}</time></div>
       <div class="collection-task-keywords"><span class="collection-task-label">${sourceLabel}</span><div class="keyword-stack">${keywords}</div>${job.current_keyword ? `<div class="collection-step">当前：${esc(job.current_keyword)}</div>` : ""}</div>
@@ -5431,6 +5505,8 @@ async function editCollection(jobId, draft = null) {
     content_type: job.content_type || "all",
     min_likes: Number(job.min_likes || 0),
     min_comments: Number(job.min_comments || 0),
+    min_duration: Number(job.min_duration || 0),
+    max_duration: Number(job.max_duration || 0),
     max_comments_per_content: job.max_comments_per_content,
     include_replies: !!job.include_replies,
     download_media: !!job.download_media,
@@ -5456,6 +5532,7 @@ async function editCollection(jobId, draft = null) {
         <div class="form-field"><label for="ecol-sort">搜索排序</label><select id="ecol-sort"><option value="general">综合排序</option><option value="latest">最新发布</option><option value="most_liked">最多点赞</option></select></div>
         <div class="form-field"><label for="ecol-publish-time">发布时间</label><select id="ecol-publish-time"><option value="all">不限</option><option value="day">一天内</option><option value="week">一周内</option><option value="half_year">半年内</option></select></div>
         <div class="form-field"><label for="ecol-content-type">内容类型</label><select id="ecol-content-type"><option value="all">全部作品</option><option value="video">视频</option><option value="images">图文 / 图集</option></select></div>
+        ${["douyin", "xhs"].includes(job.platform) ? `<div class="form-field"><label for="ecol-min-duration">最短视频时长（秒）</label><input id="ecol-min-duration" type="number" min="0" max="86400" step="1" value="${Number(initial.min_duration) || 0}"><p class="hint">0 表示不限，仅采集时长已知的视频。</p></div><div class="form-field"><label for="ecol-max-duration">最长视频时长（秒）</label><input id="ecol-max-duration" type="number" min="0" max="86400" step="1" value="${Number(initial.max_duration) || 0}"><p class="hint">包含上下限，0 表示不限。</p></div>` : ""}
         <div class="form-field"><label for="ecol-min-likes">最低点赞数</label><input id="ecol-min-likes" type="number" min="0" value="${Number(initial.min_likes) || 0}"></div>
         <div class="form-field"><label for="ecol-min-comments">最低评论数</label><input id="ecol-min-comments" type="number" min="0" value="${Number(initial.min_comments) || 0}"></div>
         <div class="form-field"><label for="ecol-stagnant-pages">连续无新增停止</label><input id="ecol-stagnant-pages" type="number" min="1" max="8" value="${Number(initial.stagnant_pages) || 3}"></div>
@@ -5488,6 +5565,8 @@ async function editCollection(jobId, draft = null) {
       content_type: $("ecol-content-type").value || "all",
       min_likes: Number($("ecol-min-likes").value || 0),
       min_comments: Number($("ecol-min-comments").value || 0),
+      min_duration: Number($("ecol-min-duration")?.value || 0),
+      max_duration: Number($("ecol-max-duration")?.value || 0),
       max_comments_per_content: Number($("ecol-comment-limit").value || 0),
       include_replies: $("ecol-replies").checked,
       download_media: $("ecol-download").checked,
@@ -5505,6 +5584,8 @@ async function editCollection(jobId, draft = null) {
         if (value.max_pages_per_keyword < 1 || value.max_pages_per_keyword > 40) uiEditorError("每词采集深度须为 1–40 页", "ecol-page-limit");
         if (value.stagnant_pages < 1 || value.stagnant_pages > 8) uiEditorError("连续无新增停止阈值须为 1–8 页", "ecol-stagnant-pages");
         if (value.min_likes < 0 || value.min_comments < 0) uiEditorError("点赞和评论门槛须为非负整数", "ecol-min-likes");
+        const durationError = durationRangeError(value.min_duration, value.max_duration, value.content_type);
+        if (durationError) uiEditorError(durationError, "ecol-min-duration");
         if (value.max_comments_per_content < 0 || value.max_comments_per_content > 200) uiEditorError("每作品评论上限须为 0–200", "ecol-comment-limit");
         return api(`/api/collections/${job.id}`, {
           method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...value, platform: job.platform, keywords }),
@@ -5592,7 +5673,7 @@ function collectionResultCard(item) {
       <span class="collection-cover-preview">${ic("i-play")}${canPreview ? "站内预览" : "暂无预览"}</span>
     </button>
     <div class="collection-result-body">
-      <div class="collection-result-tags"><span class="meta-chip group">#${esc(item.keyword)}</span><span class="pill ${downloadClass}" title="${esc(item.error || "")}">${downloadLabel}</span></div>
+      <div class="collection-result-tags"><span class="meta-chip group">#${esc(item.keyword)}</span><span class="pill ${downloadClass}" title="${esc(item.error || "")}">${downloadLabel}</span>${!isGallery ? `<span class="meta-chip">${item.duration > 0 ? `${Number(item.duration).toFixed(1).replace(/\.0$/, "")} 秒` : "时长未知"}</span>` : ""}</div>
       <a class="collection-result-title" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(title)}</a>
       <div class="collection-result-byline">${byline.map((part, index) => `<span${index === byline.length - 1 ? ' class="collection-result-id"' : ""}>${esc(part)}</span>`).join("<span>·</span>")}</div>
       <div class="collection-result-metrics" aria-label="作品数据">
@@ -5611,7 +5692,7 @@ function collectionResultCard(item) {
   </article>`;
 }
 function openCollectionPreview(jobId, contentId, startIdx = 0) {
-  return _pvOpen(() => api(`/api/collections/${jobId}/contents/${contentId}/media`), startIdx);
+  return _pvOpen(() => api(`/api/collections/${jobId}/contents/${contentId}/media`), startIdx, `collection:${jobId}:${contentId}`);
 }
 async function collectionLocalAction(jobId, contentId, action, button) {
   const old = button && button.innerHTML;
@@ -7114,9 +7195,42 @@ async function clearComments() {
 }
 
 // ─── 预览 lightbox(图集左右翻动)───
-let PV_N = 0, PV_I = 0, PV_REQ = 0;
+let PV_N = 0, PV_I = 0, PV_REQ = 0, PV_SOURCE = "";
+let PV_BACKDROP_PRESS = false;
+$("preview").addEventListener("pointerdown", event => {
+  // 拖选文案后在遮罩松手，click.target 也可能是遮罩；必须检查按下起点。
+  PV_BACKDROP_PRESS = event.target === $("preview") && event.button === 0 && event.isPrimary;
+});
+$("preview").addEventListener("pointercancel", () => { PV_BACKDROP_PRESS = false; });
+$("preview").addEventListener("pointerup", event => {
+  if (event.target !== $("preview")) PV_BACKDROP_PRESS = false;
+});
+$("preview").addEventListener("click", event => {
+  const close = PV_BACKDROP_PRESS && event.target === $("preview");
+  PV_BACKDROP_PRESS = false;
+  if (close) hidePreview();
+});
+function _pvSetCaption(text, copyable = false) {
+  $("pv-cap").textContent = text || "";
+  $("pv-copy-actions").hidden = !copyable || !String(text || "").trim();
+  $("pv-copy-msg").textContent = "";
+}
+async function copyPreviewCaption() {
+  const text = $("pv-cap").textContent;
+  if (!text.trim()) return;
+  const req = PV_REQ;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (req === PV_REQ) $("pv-copy-msg").textContent = "文案已复制，保留换行与表情";
+  } catch (error) {
+    if (req !== PV_REQ) return;
+    const range = document.createRange(); range.selectNodeContents($("pv-cap"));
+    const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    $("pv-copy-msg").textContent = "已选中文案，请按 Ctrl+C 或使用右键复制";
+  }
+}
 function _pvRender(d) {
-  const box = $("pv-media"), cap = $("pv-cap");
+  const box = $("pv-media");
   const vid = (d.medias || []).find(m => m.kind === "video");
   if (d.media_type === "video" && (d.local_url || vid)) {
     const videoUrl = d.local_url || vid.url;
@@ -7153,13 +7267,21 @@ function _pvRender(d) {
       pvUpdate();
     }
   }
-  cap.textContent = d.desc || "";
+  _pvSetCaption(d.desc, true);
 }
-async function _pvOpen(fetcher, startIdx) {
+async function _pvOpen(fetcher, startIdx, source = "") {
   const ov = $("preview"), box = $("pv-media");
+  // 同一作品已打开或正在加载时不重建媒体，避免重复点击重载、重播视频。
+  if (source && source === PV_SOURCE && ov.style.display !== "none" && !ov.hasAttribute("data-ui-closing")) {
+    if (Number.isInteger(startIdx) && PV_N > 1) {
+      PV_I = Math.max(0, Math.min(startIdx, PV_N - 1)); pvUpdate();
+    }
+    return;
+  }
+  PV_SOURCE = source; PV_BACKDROP_PRESS = false;
   const req = ++PV_REQ;
   PV_N = 0; PV_I = 0;
-  box.innerHTML = `<div class="pv-loading">加载中…</div>`; $("pv-cap").textContent = "";
+  box.innerHTML = `<div class="pv-loading">加载中…</div>`; _pvSetCaption("");
   ov.style.display = "flex";
   modalOpened(ov);
   setTimeout(() => ov.querySelector(".pv-close").focus(), 0);
@@ -7170,17 +7292,21 @@ async function _pvOpen(fetcher, startIdx) {
     if (startIdx && PV_N > 1) { PV_I = Math.max(0, Math.min(startIdx, PV_N - 1)); pvUpdate(); }
   }
   catch (e) {
-    if (req === PV_REQ) box.innerHTML = `<div class="pv-loading">预览失败:${esc(e.message)}</div>`;
+    if (req === PV_REQ) {
+      PV_SOURCE = "";
+      box.innerHTML = `<div class="pv-loading">预览失败:${esc(e.message)}</div>`;
+    }
   }
 }
 function openPreview(id, startIdx) {
-  return _pvOpen(() => api("/api/contents/" + id + "/media"), startIdx || 0);
+  return _pvOpen(() => api("/api/contents/" + id + "/media"), startIdx || 0, `content:${id}`);
 }
 function openPubPreview(accId, noteId, tok, src) {
   return _pvOpen(() => api(`/api/publish/note-media?account_id=${accId}&note_id=${encodeURIComponent(noteId)}&xsec_token=${encodeURIComponent(tok || "")}&xsec_source=${encodeURIComponent(src || "")}`));
 }
 async function openPubComments(accId, noteId, tok, src) {
   const ov = $("preview"), box = $("pv-media"), cap = $("pv-cap");
+  PV_SOURCE = ""; PV_BACKDROP_PRESS = false; _pvSetCaption("");
   const req = ++PV_REQ;
   PV_N = 0; PV_I = 0;
   box.innerHTML = `<div class="pv-loading">加载评论…</div>`; cap.textContent = ""; ov.style.display = "flex";
@@ -7226,8 +7352,9 @@ function _pvBindSwipe() {
 }
 function hidePreview() {
   PV_REQ++;
+  PV_SOURCE = ""; PV_BACKDROP_PRESS = false;
   const v = $("pv-media").querySelector("video"); if (v) { try { v.pause(); } catch (e) {} }
-  $("preview").style.display = "none"; $("pv-media").innerHTML = ""; $("pv-cap").textContent = "";
+  $("preview").style.display = "none"; $("pv-media").innerHTML = ""; _pvSetCaption("");
   PV_N = 0; PV_I = 0;
   modalClosed($("preview"));
 }
@@ -8309,7 +8436,7 @@ $("collection-content-list").innerHTML = collectionResultSkeleton(4);
 $("queue-table").innerHTML = skeleton(7);
 
 // restore last-selected section (default: 总览);旧版四个独立页已并入「账号管理」
-const VALID_TABS = ["overview", "accounts", "risk-control", "queue", "collections", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "notifications", "settings"];
+const VALID_TABS = ["overview", "accounts", "risk-control", "queue", "collections", "monitors", "comments", "danmaku", "hub", "publish", "autocomment", "share-download", "ai-copy", "notifications", "settings"];
 const LEGACY_HUB_TABS = ["myworks", "following", "fans", "dm"];
 switchTab((() => {
   try {
@@ -8402,6 +8529,7 @@ window.CreatorHubBridge = {
       notifications: [refreshChannels, refreshWebhooks], settings: [loadSettings],
       "risk-control": [refreshRiskCenter], hub: [refreshHubSummary, refreshHubPanel],
       "share-download": [refreshShareHistory],
+      "ai-copy": [loadSettings],
     };
     await Promise.allSettled((refreshers[CURRENT_TAB] || []).map(fn => Promise.resolve().then(() => fn())));
   },

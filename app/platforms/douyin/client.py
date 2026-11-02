@@ -1011,9 +1011,11 @@ class DouyinClient:
     async def search_awemes(self, keyword: str, *, max_results: int = 20,
                             max_pages: int = 3, search_sort: str = "general",
                             publish_time: str = "all", content_type: str = "all",
-                            min_likes: int = 0, min_comments: int = 0) -> tuple[List[dict], str]:
+                            min_likes: int = 0, min_comments: int = 0,
+                            min_duration: int = 0, max_duration: int = 0) -> tuple[List[dict], str]:
         """分页搜索并做本地筛选；返回 (作品列表, 可回退原因)。"""
         import time
+        from .extract import video_duration_matches
         # search_id belongs to one keyword pagination chain, not the account.
         self._search_id = ""
         found: Dict[str, dict] = {}
@@ -1026,6 +1028,11 @@ class DouyinClient:
             if page.get("error"):
                 return list(found.values())[:max_results], str(page["error"])
             for item in page.get("items") or []:
+                if not video_duration_matches(
+                        "images" if item.get("images") else "video",
+                        float((item.get("video") or {}).get("duration") or 0) / 1000,
+                        min_duration, max_duration):
+                    continue
                 stats = item.get("statistics") or {}
                 if content_type == "video" and not item.get("video"):
                     continue

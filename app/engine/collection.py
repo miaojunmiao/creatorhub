@@ -39,7 +39,7 @@ from ..platforms.douyin import (
     parse_comment,
     safe_title,
 )
-from ..platforms.douyin.extract import Aweme
+from ..platforms.douyin.extract import Aweme, video_duration_matches
 from ..platforms.kuaishou import (
     flatten_ks_comments,
     parse_ks_comment,
@@ -158,6 +158,9 @@ def _sort_ks_search_items(items: list[dict], search_sort: str) -> list[dict]:
 def _collection_content_matches(aweme: Aweme, job: KeywordCollectionJob,
                                 *, now: int | None = None) -> bool:
     if job.content_type != "all" and aweme.media_type != job.content_type:
+        return False
+    if not video_duration_matches(
+            aweme.media_type, aweme.duration, job.min_duration, job.max_duration):
         return False
     if aweme.like_count < max(0, int(job.min_likes or 0)):
         return False
@@ -315,6 +318,8 @@ class KeywordCollector:
                     content_type=job.content_type,
                     min_likes=job.min_likes,
                     min_comments=job.min_comments,
+                    min_duration=job.min_duration,
+                    max_duration=job.max_duration,
                 )
             except Exception as exc:
                 message = f"抖音搜索接口异常: {exc!r}"
@@ -341,6 +346,7 @@ class KeywordCollector:
         elif mode == "api":
             return [], "抖音搜索接口异常: API 客户端不可用"
         identity = self.browser.identity_for(account)
+        job_id = getattr(job, "id", None)
         return await fetch_douyin_search(
             self.browser, identity, keyword,
             max_results=job.max_contents_per_keyword,
@@ -351,9 +357,13 @@ class KeywordCollector:
             content_type=job.content_type,
             min_likes=job.min_likes,
             min_comments=job.min_comments,
+            min_duration=job.min_duration,
+            max_duration=job.max_duration,
             captcha_wait_seconds=self.cfg.engine.douyin_captcha_wait_seconds,
             block_media=self.cfg.engine.block_media_resources,
             context=context,
+            on_progress=(lambda step: self._progress(job_id, step=step)) if job_id else None,
+            cancel_requested=(lambda: self._cancel_requested(job_id)) if job_id else None,
         )
 
     async def _discover_douyin_creator(
@@ -417,7 +427,8 @@ class KeywordCollector:
         found: dict[str, dict] = {}
         pages = max(1, min(40, int(job.max_pages_per_keyword or 1)))
         needs_local_filter = bool(
-            job.publish_time != "all" or job.min_likes or job.min_comments)
+            job.publish_time != "all" or job.min_likes or job.min_comments
+            or job.min_duration or job.max_duration)
         candidate_limit = (pages * 20 if needs_local_filter
                            else job.max_contents_per_keyword)
         stagnant = 0
@@ -566,6 +577,7 @@ class KeywordCollector:
                 create_time=int(brief.get("create_time") or 0),
                 author_name=brief.get("author_name") or "",
                 media_type="video" if brief.get("type") == "video" else "images",
+                duration=brief.get("duration") or 0,
             )
             aweme.platform = "xhs"
             aweme.cover = brief.get("cover") or ""
@@ -591,6 +603,7 @@ class KeywordCollector:
                 create_time=int(brief.get("create_time") or 0),
                 author_name=brief.get("author_name") or "",
                 media_type="video" if brief.get("type") == "video" else "images",
+                duration=brief.get("duration") or 0,
             )
             aweme.platform = "xhs"
             aweme.cover = brief.get("cover") or ""
@@ -621,6 +634,7 @@ class KeywordCollector:
             row.cover_url = aweme.cover or ""
             row.like_count = aweme.like_count
             row.comment_count = aweme.comment_count
+            row.duration = aweme.duration
             row.media_json = _media_json(aweme)
             row.xsec_token = xsec_token
             row.xsec_source = xsec_source
@@ -1017,8 +1031,7 @@ class KeywordCollector:
             if job.platform == "kuaishou":
                 raw_items = _sort_ks_search_items(raw_items, job.search_sort)
 
-            candidates = (raw_items[:job.max_contents_per_keyword]
-                          if job.platform == "douyin" else raw_items)
+            candidates = raw_items
             accepted = 0
             for index, raw in enumerate(candidates, 1):
                 if self._cancel_requested(job_id):
@@ -1045,6 +1058,9 @@ class KeywordCollector:
                             create_time=int(raw.get("create_time") or 0),
                             author_name=author.get("nickname") or "",
                             media_type="images" if raw.get("images") else "video",
+                            duration=float((raw.get("video") or {}).get("duration") or 0) / 1000,
+                            like_count=int((raw.get("statistics") or {}).get("digg_count") or 0),
+                            comment_count=int((raw.get("statistics") or {}).get("comment_count") or 0),
                         )
                         detail_error = "未取得媒体地址"
                     token = ""
@@ -1088,8 +1104,7 @@ class KeywordCollector:
                 if aweme is None:
                     self._record_error(job_id, f"{keyword}: 无法解析一条搜索结果")
                     continue
-                if job.platform in {"xhs", "kuaishou", "shipinhao"} and not \
-                        _collection_content_matches(aweme, job):
+                if not _collection_content_matches(aweme, job):
                     continue
 
                 current = self._job(job_id)

@@ -72,6 +72,14 @@ class RiskDecision:
     signal: str = ""
 
 
+class OperationCapacityBusy(RuntimeError):
+    """Local execution capacity is occupied; this is not a platform failure."""
+
+    def __init__(self, reason: str, signal: str):
+        super().__init__(reason)
+        self.signal = signal
+
+
 @dataclass(frozen=True)
 class FailureDecision:
     category: RiskCategory
@@ -872,7 +880,8 @@ class RiskController:
         return removed
 
     @asynccontextmanager
-    async def network_guard(self, account_or_id: DouyinAccount | int | None):
+    async def network_guard(self, account_or_id: DouyinAccount | int | None,
+                            *, skip_busy: bool = False):
         if not self.policy.enabled:
             yield "disabled"
             return
@@ -892,5 +901,7 @@ class RiskController:
             if sem is None:
                 sem = asyncio.Semaphore(self._network_concurrency())
                 self._network_locks[key] = sem
+        if skip_busy and sem.locked():
+            raise OperationCapacityBusy("共享网络出口正被其他操作使用", "network_busy")
         async with sem:
             yield key

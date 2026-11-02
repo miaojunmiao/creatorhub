@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from .identity import Identity
@@ -215,9 +215,16 @@ _SEARCH_TIME_SECONDS = {"day": 86400, "week": 7 * 86400, "half_year": 180 * 8640
 
 def _douyin_search_item_matches(item: dict, *, content_type: str = "all",
                                 publish_time: str = "all", min_likes: int = 0,
-                                min_comments: int = 0, now: int | None = None) -> bool:
+                                min_comments: int = 0, now: int | None = None,
+                                min_duration: int = 0, max_duration: int = 0) -> bool:
     """对平台返回结果做确定性二次筛选，避免页面筛选未生效时混入错误数据。"""
     if not isinstance(item, dict):
+        return False
+    from ..platforms.douyin.extract import video_duration_matches
+    if not video_duration_matches(
+            "images" if item.get("images") else "video",
+            float((item.get("video") or {}).get("duration") or 0) / 1000,
+            min_duration, max_duration):
         return False
     if content_type == "video" and not item.get("video"):
         return False
@@ -391,16 +398,21 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
                                content_type: str = "all",
                                min_likes: int = 0,
                                min_comments: int = 0,
+                               min_duration: int = 0,
+                               max_duration: int = 0,
                                settle_ms: int = 1800,
                                captcha_wait_seconds: int = 300,
                                block_media: bool = False,
-                               context=None) -> Tuple[List[dict], str]:
+                               context=None,
+                               on_progress: Callable[[str], None] | None = None,
+                               cancel_requested: Callable[[], bool] | None = None,
+                               ) -> Tuple[List[dict], str]:
     """打开抖音视频搜索页，拦截站内搜索响应并返回作品原始对象。"""
     collected: Dict[str, dict] = {}
     api_seen: List[str] = []
     error = ""
     verification_active = False
-    verification_seen = False
+    verification_wait_remaining = max(1, min(600, int(captcha_wait_seconds)))
     search_candidates_seen = 0
     search_sort = search_sort if search_sort in _SEARCH_SORT_CODES else "general"
     publish_time = publish_time if publish_time in _SEARCH_TIME_CODES else "all"
@@ -423,12 +435,13 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
             aid = str(raw.get("aweme_id") or "")
             if aid and _douyin_search_item_matches(
                     raw, content_type=content_type, publish_time=publish_time,
-                    min_likes=min_likes, min_comments=min_comments):
+                    min_likes=min_likes, min_comments=min_comments,
+                    min_duration=min_duration, max_duration=max_duration):
                 collected.setdefault(aid, raw)
         return len(collected) - before
 
     async def on_response(resp):
-        nonlocal verification_active, verification_seen
+        nonlocal verification_active
         url = resp.url
         # 保留已知接口，同时接受路径中含 search 的新版本网页接口，避免平台只改
         # 路径就被误报成“没有发出搜索接口”。
@@ -449,24 +462,42 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
         for payload in payloads:
             if _douyin_search_needs_verification(payload):
                 verification_active = True
-                verification_seen = True
                 continue
-            if collect_payload(payload):
+            added = collect_payload(payload)
+            if added or (isinstance(payload, dict)
+                         and payload.get("status_code", 0) == 0
+                         and ("data" in payload or "aweme_list" in payload)):
                 verification_active = False
+
+    def report(step: str) -> None:
+        if on_progress is not None:
+            on_progress(step)
+
+    def stopped() -> bool:
+        return cancel_requested is not None and cancel_requested()
 
     async def wait_for_verification() -> bool:
         """Bring the browser forward and wait for manual verification."""
+        nonlocal verification_wait_remaining
         if not verification_active:
             return True
         try:
             await page.bring_to_front()
         except Exception:
             pass
-        rounds = max(1, min(600, int(captcha_wait_seconds)))
-        for _ in range(rounds):
+        report(f"等待人工完成抖音验证（剩余 {verification_wait_remaining} 秒）")
+        while verification_wait_remaining > 0:
+            if stopped():
+                return False
             await page.wait_for_timeout(1000)
-            if collected or not verification_active:
+            if stopped():
+                return False
+            verification_wait_remaining -= 1
+            if not verification_active:
+                report("搜索作品")
                 return True
+            if verification_wait_remaining % 5 == 0:
+                report(f"等待人工完成抖音验证（剩余 {verification_wait_remaining} 秒）")
         return False
 
     page.on("response", on_response)
@@ -474,6 +505,8 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
     page_title = ""
     page_text = ""
     try:
+        if stopped():
+            return [], ""
         # 先像普通用户一样进入站内搜索结果页，只消费页面自己发出的响应。
         query = urlencode({
             "type": "video" if content_type == "video" else "general",
@@ -481,11 +514,10 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
             "sort_type": _SEARCH_SORT_CODES[search_sort],
         })
         target = f"https://www.douyin.com/search/{quote(keyword, safe='')}?{query}"
+        report("打开抖音搜索页")
         await page.goto(target, wait_until="domcontentloaded", timeout=30000)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=12000)
-        except Exception:
-            pass
+        # 抖音持续加载媒体/长连接；页面搜索响应才是数据就绪信号。
+        report("等待抖音搜索结果")
         await page.wait_for_timeout(settle_ms)
 
         challenge_error = ""
@@ -493,6 +525,8 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
             challenge_error = (
                 "抖音要求完成滑块验证；本次任务已停止后续请求，"
                 "请完成验证并等待冷却后再续跑")
+        if stopped():
+            return [], ""
 
         # 某些 AB 页面进入 URL 后不会自动提交首屏搜索。此时只操作一次页面搜索框，
         # 由抖音页面生成参数和签名；不再使用 context.request/page.fetch 兜底。
@@ -508,11 +542,16 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
                     challenge_error = (
                         "抖音要求完成滑块验证；本次任务已停止后续请求，"
                         "请完成验证并等待冷却后再续跑")
+        if stopped():
+            return [], ""
 
         stagnant = 0
-        for _ in range(0 if challenge_error else max(1, min(max_scrolls, 40))):
+        for index in range(0 if challenge_error else max(1, min(max_scrolls, 40))):
+            if stopped():
+                return [], ""
             if len(collected) >= max_results:
                 break
+            report(f"读取抖音搜索结果（第 {index + 1} 页，已找到 {len(collected)} 个作品）")
             before = len(collected)
             try:
                 await page.evaluate(_SCROLL_PROFILE_JS)
@@ -520,18 +559,23 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
                 pass
             await page.mouse.wheel(0, 4200)
             await page.wait_for_timeout(settle_ms)
+            if stopped():
+                return [], ""
             if verification_active and not await wait_for_verification():
                 challenge_error = (
                     "抖音要求完成滑块验证；本次任务已停止后续请求，"
                     "请完成验证并等待冷却后再续跑")
                 break
+            if stopped():
+                return [], ""
             if len(collected) == before:
                 stagnant += 1
-                if collected and stagnant >= stagnant_limit:
+                if stagnant >= stagnant_limit:
                     break
             else:
                 stagnant = 0
         final_url = page.url
+        error = challenge_error
         if not collected:
             try:
                 page_title = (await page.title()).strip()
@@ -547,7 +591,7 @@ async def fetch_douyin_search(mgr: BrowserManager, identity: Identity, keyword: 
             error = challenge_error or filter_error or (
                 "抖音触发验证码/安全验证；本次任务已停止后续请求，"
                 "请完成验证并等待冷却后再续跑"
-                if verification_seen else "") or douyin_search_empty_error(
+                if verification_active else "") or douyin_search_empty_error(
                 page_title, page_text, final_url, api_seen)
     except Exception as exc:
         error = douyin_search_exception_error(exc)

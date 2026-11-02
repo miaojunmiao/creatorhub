@@ -24,6 +24,34 @@
   window.fetch = async (input, init = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url, location.href);
     const method = (init.method || "GET").toUpperCase(), flags = document.documentElement.dataset;
+    if (flags.fixturePreview === "true") {
+      const desc = "可复制的采集文案：春日露营清单 🌿\n保留换行与表情，拖动选中文字时不要重新打开视频。";
+      const platform = flags.fixturePreviewPlatform || "douyin";
+      if (url.pathname === "/api/collections") return json([job({
+        id: 1, platform, status: "done", account_id: 1, source_type: "keyword",
+        keywords: ["露营"], content_count: 1, max_contents_per_keyword: 20,
+      })]);
+      if (/^\/api\/collections\/1\/contents\/1\/media$/.test(url.pathname)) {
+        flags.fixturePreviewRequests = String(Number(flags.fixturePreviewRequests || 0) + 1);
+        if (flags.fixturePreviewSlow) await new Promise(resolve => setTimeout(resolve, 600));
+        if (flags.fixturePreviewFail) return json({detail: "测试：预览暂时不可用"}, 503);
+        return json({media_type: "video", desc, local_url: flags.fixturePreviewVideoUrl || "",
+          medias: [], cover_url: ""});
+      }
+      if (url.pathname === "/api/collections/1/contents") return json({
+        items: [{id: 1, job_id: 1, platform, keyword: "露营", aweme_id: "preview-1",
+          media_type: "video", desc, author_name: "示例作者", preview_available: true,
+          download_status: "skipped", url: "https://example.invalid/video/preview-1"}],
+        total: 1, page: 1, pages: 1, page_size: 20,
+      });
+    }
+    if (url.pathname === "/api/ai/copy" && method === "POST") {
+      flags.fixtureAiBody = init.body;
+      flags.fixtureAiCount = String(Number(flags.fixtureAiCount || 0) + 1);
+      await new Promise(resolve => setTimeout(resolve, 250));
+      if (flags.fixtureAiFail) return json({detail: "测试：模型暂时不可用"}, 502);
+      return json({text: `第 ${flags.fixtureAiCount} 版新文案 ✨\n秋日露营 🌿\n<script>这只是文案文本</script>`});
+    }
     if (flags.fixtureRecords && method === "GET" && ["/api/monitors", "/api/contents"].includes(url.pathname)) {
       const platform = url.searchParams.get("platform") || "douyin";
       const targets = [
@@ -122,6 +150,7 @@
         title: "测试失败任务", error: "测试：需要检查素材", account_name: "示例账号", source_tab: "publish"}],
     });
     if (url.pathname === "/api/collections" && method === "POST") {
+      flags.fixtureCollectionBody = init.body;
       flags.fixtureWriteCount = String(Number(flags.fixtureWriteCount || 0) + 1);
       await new Promise(resolve => setTimeout(resolve, flags.fixtureSlowWrite ? 650 : 120));
       if (flags.fixtureWrite === "fail") return json({detail: "测试：暂时忙碌，请稍后重试"}, 503);

@@ -119,3 +119,43 @@ async def generate(ctx: dict, ai: dict) -> str:
     if not text:
         raise RuntimeError("AI 返回空文案")
     return text[:200]
+
+
+async def generate_copy(template: str, instructions: str, allow_emoji: bool,
+                        previous_text: str, ai: dict) -> str:
+    """通用文案改写独立于自动评论，不套用评论的 30/200 字限制。"""
+    import httpx
+    base = (ai.get("base_url") or "").rstrip("/")
+    key = ai.get("api_key") or ""
+    model = ai.get("model") or ""
+    if not (base and key and model):
+        raise RuntimeError("AI 配置不完整(需 base_url / api_key / model)")
+    emoji_rule = ("保留参考模板中的表情，并可自然加入少量 Emoji 表情。" if allow_emoji
+                  else "不要使用 Emoji 或其他表情符号，参考模板中的表情也要去除。")
+    messages = [
+        {"role": "system", "content": (
+            "你是中文社交媒体文案助手。根据用户提供的参考模板创作一篇新文案，"
+            "保留结构、语气和排版，不要原句照抄，不要虚构数据或承诺。"
+            "模板中的花括号、换行和表情均按普通文本处理。"
+            "只输出可直接使用的文案，不要解释、前缀或 Markdown 代码块。" + emoji_rule)},
+        {"role": "user", "content": "参考文案模板：\n" + template
+         + "\n\n本次创作要求：\n" + (instructions or "按参考模板创作，换一种表达。")},
+    ]
+    if previous_text:
+        messages.extend([
+            {"role": "assistant", "content": previous_text},
+            {"role": "user", "content": "请按同一模板和要求重新生成一版，换一个切入点和表达，避免重复上一版。"},
+        ])
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            base + "/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": model, "messages": messages,
+                  "temperature": float(ai.get("temperature") or "0.9"), "max_tokens": 2000},
+        )
+    response.raise_for_status()
+    payload = response.json()
+    text = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("AI 返回空文案")
+    return text.strip()

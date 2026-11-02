@@ -62,9 +62,11 @@ from ..operations import record_account_operation
 from ..netfp import probe_ip_region
 from ..risk import (
     classify_platform_error,
+    OperationCapacityBusy,
     OperationKind,
     RiskCategory,
     RiskController,
+    RiskDecision,
 )
 from ..settings import get_setting
 from ..transport_matrix import douyin_client_environment, resolve_transport
@@ -80,7 +82,7 @@ log = logging.getLogger("creatorhub.engine")
 
 
 class _AccountCheckBusy(RuntimeError):
-    """An account became busy while a health check waited for its network slot."""
+    """An account Profile is already reserved by another operation."""
 
 # 账号时区 -> 期望出口国家(ISO2)。仅列常见,匹配不到则跳过地区校验。
 _TZ_COUNTRY = {
@@ -263,6 +265,8 @@ class MonitorEngine:
         self._commenting: set[int] = set()         # 正在执行的评论任务 id
         self._actioning: set[int] = set()           # 正在执行的写操作任务 id
         self._collection_tasks: dict[int, asyncio.Task] = {}  # 一次性关键词采集
+        self._collection_dispatch_task: Optional[asyncio.Task] = None
+        self._collection_wake = asyncio.Event()
         self._last_acct_check = 0.0   # 启动后首轮校验，不沿用历史“正常”状态
         self._pending_account_checks: set[int] = set()
         self._geo_checked: dict = {}          # account_id -> 已校验过地区的代理(避免重复探测)
@@ -310,6 +314,7 @@ class MonitorEngine:
     def start(self):
         if self._task is None:
             self._running = True
+            self._collection_dispatch_task = asyncio.create_task(self._collection_loop())
             self._task = asyncio.create_task(self._loop())
             log.info("监控引擎已启动")
 
@@ -372,6 +377,10 @@ class MonitorEngine:
 
     async def stop(self):
         self._running = False
+        if self._collection_dispatch_task:
+            self._collection_dispatch_task.cancel()
+            await asyncio.gather(self._collection_dispatch_task, return_exceptions=True)
+            self._collection_dispatch_task = None
         if self._task:
             task = self._task
             task.cancel()
@@ -409,16 +418,21 @@ class MonitorEngine:
     @asynccontextmanager
     async def _operation_guard(self, account_id, kind: OperationKind,
                                fallback_key: str = "", operation_target=None,
-                               skip_busy: bool = False):
-        """Serialize by global limit, network exit, then account profile."""
+                               skip_busy: bool = False,
+                               skip_capacity: bool = False):
+        """Reserve the Profile before taking shared operation/network capacity."""
         account = operation_target or self._load_account(account_id)
         key = f"acc:{account_id}" if account_id else (fallback_key or "anon")
         lock = self.browser.lock_for(key)
-        async with self._active_sem:
-            async with self.risk.network_guard(account):
-                if skip_busy and lock.locked():
-                    raise _AccountCheckBusy()
-                async with lock:
+        if skip_busy and lock.locked():
+            raise _AccountCheckBusy()
+        async with lock:
+            if skip_capacity and self._active_sem.locked():
+                raise OperationCapacityBusy("执行通道正被其他操作使用", "execution_busy")
+            async with self._active_sem:
+                network_guard = (self.risk.network_guard(account, skip_busy=True)
+                                 if skip_capacity else self.risk.network_guard(account))
+                async with network_guard:
                     if account_id and self._load_account(account_id) is None:
                         raise AccountUnavailableError("绑定账号已删除，操作已停止")
                     yield account
@@ -752,7 +766,6 @@ class MonitorEngine:
                     await self._process_comment_rules()
                     await self._process_comment_tasks()
                     await self._process_action_tasks()
-                    await self._process_collection_jobs()
                     next_maintenance_at = time.monotonic() + 15
                 poll_seconds = self._monitor_poll_seconds()
             except Exception as e:
@@ -838,13 +851,74 @@ class MonitorEngine:
 
         def done(completed: asyncio.Task, jid: int = job_id):
             self._collection_tasks.pop(jid, None)
+            self._collection_wake.set()
             try:
-                completed.exception()
-            except (asyncio.CancelledError, Exception):
+                completed.result()
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                log.exception("collection job %s failed outside its runner", jid)
 
         task.add_done_callback(done)
         return True
+
+    async def _collection_loop(self) -> None:
+        """Dispatch independently of slow/failed monitor and maintenance work."""
+        while self._running:
+            self._collection_wake.clear()
+            delay = 15.0
+            try:
+                await self._process_collection_jobs()
+                if not self._collection_tasks:
+                    now = datetime.utcnow()
+                    with get_session() as session:
+                        deadline = session.exec(
+                            select(KeywordCollectionJob.next_allowed_at)
+                            .where(KeywordCollectionJob.status == "pending",
+                                   KeywordCollectionJob.cancel_requested == False,  # noqa:E712
+                                   KeywordCollectionJob.next_allowed_at > now)
+                            .order_by(KeywordCollectionJob.next_allowed_at).limit(1)
+                        ).first()
+                    if deadline:
+                        delay = max(0.05, min(delay, (deadline - now).total_seconds()))
+            except Exception:
+                log.exception("collection dispatch error")
+            try:
+                await asyncio.wait_for(self._collection_wake.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+
+    def _defer_collection_job(self, job_id: int, decision: RiskDecision) -> dict:
+        with get_session() as session:
+            job = session.get(KeywordCollectionJob, job_id)
+            if job and job.status == "pending" and not job.cancel_requested:
+                signal = decision.signal or self._blocked_signal(decision.reason)
+                changed = (job.blocked_reason != decision.reason
+                           or job.blocked_signal != signal
+                           or job.next_allowed_at != decision.next_allowed_at)
+                job.current_step = f"等待执行：{decision.reason}"
+                job.blocked_reason = decision.reason
+                job.blocked_signal = signal
+                job.blocked_operation = OperationKind.READ_HEAVY.value
+                if changed:
+                    job.blocked_at = datetime.utcnow()
+                job.next_allowed_at = decision.next_allowed_at
+                session.add(job)
+                session.commit()
+                if changed:
+                    self._log_collection_operation(
+                        job, "deferred", "blocked", decision.reason,
+                        risk_signal=signal)
+        return {"ok": True, "deferred": True, "reason": decision.reason,
+                "signal": decision.signal,
+                "next_allowed_at": (decision.next_allowed_at.isoformat() + "Z"
+                                    if decision.next_allowed_at else None)}
+
+    @staticmethod
+    def _collection_busy_decision() -> RiskDecision:
+        return RiskDecision(
+            False, "账号正在被其他操作占用，请关闭手动打开的账号浏览器或等待操作完成",
+            signal="account_busy")
 
     async def _process_collection_jobs(self) -> None:
         if self._collection_tasks:
@@ -861,6 +935,10 @@ class MonitorEngine:
         for job in jobs:
             decision = self.risk.preflight(job.account_id, OperationKind.READ_HEAVY)
             if not decision.allowed and decision.signal != "account_missing":
+                self._defer_collection_job(job.id, decision)
+                continue
+            if self.browser.lock_for(f"acc:{job.account_id}").locked():
+                self._defer_collection_job(job.id, self._collection_busy_decision())
                 continue
             # A held account must not block later jobs on healthy accounts.
             if self.enqueue_collection_job(job.id):
@@ -901,47 +979,15 @@ class MonitorEngine:
 
         decision = self.risk.preflight(account_id, OperationKind.READ_HEAVY)
         if not decision.allowed:
-            with get_session() as s:
-                job = s.get(KeywordCollectionJob, job_id)
-                if job and job.status == "pending":
-                    job.current_step = "等待账号读取冷却"
-                    job.blocked_reason = decision.reason
-                    job.blocked_signal = decision.signal or self._blocked_signal(
-                        decision.reason)
-                    job.blocked_operation = OperationKind.READ_HEAVY.value
-                    job.blocked_at = datetime.utcnow()
-                    job.next_allowed_at = decision.next_allowed_at
-                    s.add(job); s.commit()
-                    self._log_collection_operation(
-                        job, "deferred", "blocked", decision.reason,
-                        risk_signal=decision.signal)
-            return {"ok": True, "deferred": True, "reason": decision.reason,
-                    "signal": decision.signal,
-                    "next_allowed_at": (decision.next_allowed_at.isoformat()
-                                        if decision.next_allowed_at else None)}
+            return self._defer_collection_job(job_id, decision)
 
         try:
-            async with self._operation_guard(account_id, OperationKind.READ_HEAVY):
+            async with self._operation_guard(
+                    account_id, OperationKind.READ_HEAVY,
+                    skip_busy=True, skip_capacity=True):
                 decision = self.risk.preflight(account_id, OperationKind.READ_HEAVY)
                 if not decision.allowed:
-                    with get_session() as s:
-                        job = s.get(KeywordCollectionJob, job_id)
-                        if job and job.status == "pending":
-                            job.current_step = "等待账号读取冷却"
-                            job.blocked_reason = decision.reason
-                            job.blocked_signal = decision.signal or self._blocked_signal(
-                                decision.reason)
-                            job.blocked_operation = OperationKind.READ_HEAVY.value
-                            job.blocked_at = datetime.utcnow()
-                            job.next_allowed_at = decision.next_allowed_at
-                            s.add(job); s.commit()
-                            self._log_collection_operation(
-                                job, "deferred", "blocked", decision.reason,
-                                risk_signal=decision.signal)
-                    return {"ok": True, "deferred": True,
-                            "reason": decision.reason, "signal": decision.signal,
-                            "next_allowed_at": (decision.next_allowed_at.isoformat()
-                                                if decision.next_allowed_at else None)}
+                    return self._defer_collection_job(job_id, decision)
                 with get_session() as s:
                     job = s.get(KeywordCollectionJob, job_id)
                     if not job:
@@ -1024,6 +1070,11 @@ class MonitorEngine:
                 status, job_error,
                 duration_ms=int((time.monotonic() - started_clock) * 1000))
             return {"ok": status in {"done", "partial"}, "status": status, **result}
+        except _AccountCheckBusy:
+            return self._defer_collection_job(job_id, self._collection_busy_decision())
+        except OperationCapacityBusy as exc:
+            return self._defer_collection_job(job_id, RiskDecision(
+                False, str(exc), datetime.utcnow() + timedelta(seconds=15), exc.signal))
         except asyncio.CancelledError:
             with get_session() as s:
                 job = s.get(KeywordCollectionJob, job_id)

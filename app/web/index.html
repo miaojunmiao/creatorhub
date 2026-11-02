@@ -245,6 +245,10 @@
     max-height:30vh; overflow-y:auto;
   }
   .pv-cap:empty { display:none; }
+  .pv-copy-actions { flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 20px; border-top:1px solid var(--line-soft); }
+  .pv-copy-actions[hidden] { display:none; }
+  .pv-copy-actions .status-text { min-width:0; font-size:12px; color:var(--mut); }
+  .pv-copy-actions button { flex:0 0 auto; }
   @media(max-width:600px){ .pv-slide{height:62vh} .pv-arrow{width:36px;height:36px} }
 
   /* ── 笔记评论列表(预览弹层内) ── */
@@ -1836,11 +1840,12 @@
     <button class="navitem dy-only" data-tab="danmaku" onclick="switchTab('danmaku', true)"><svg><use href="#i-captions"/></svg><span class="nav-label">弹幕监控</span><span class="nav-badge" id="tb-danmaku">0</span></button>
     <div class="nav-sep">本账号</div>
     <button class="navitem" data-tab="hub" onclick="switchTab('hub', true)"><svg><use href="#i-library"/></svg><span class="nav-label">我的内容</span></button>
-    <div class="nav-sep">工具</div>
+    <div class="nav-sep">通用工具</div>
     <button class="navitem" data-tab="queue" onclick="switchTab('queue', true)"><svg><use href="#i-list"/></svg><span class="nav-label">任务队列</span><span class="nav-badge" id="tb-queue">0</span></button>
     <button class="navitem pub-only" data-tab="publish" onclick="switchTab('publish', true)"><svg><use href="#i-send"/></svg><span class="nav-label">发布</span><span class="nav-badge" id="tb-pub">0</span></button>
     <button class="navitem notsh-only" data-tab="autocomment" onclick="switchTab('autocomment', true)"><svg><use href="#i-automation"/></svg><span class="nav-label">自动评论</span><span class="nav-badge" id="tb-ac">0</span></button>
     <button class="navitem" data-tab="share-download" onclick="switchTab('share-download', true)"><svg><use href="#i-download"/></svg><span class="nav-label">链接下载</span></button>
+    <button class="navitem" data-tab="ai-copy" onclick="switchTab('ai-copy', true)"><svg><use href="#i-bolt"/></svg><span class="nav-label">AI 文案</span></button>
     <button class="navitem" data-tab="notifications" onclick="switchTab('notifications', true)"><svg><use href="#i-bell"/></svg><span class="nav-label">通知</span></button>
     <button class="navitem" data-tab="settings" onclick="switchTab('settings', true)"><svg><use href="#i-settings"/></svg><span class="nav-label">设置</span></button>
     <div class="nav-sep">安全</div>
@@ -2187,6 +2192,15 @@
           <div class="form-field" id="col-sort-wrap"><label for="col-sort">搜索排序</label><select id="col-sort"><option value="general">综合排序</option><option value="latest">最新发布</option><option value="most_liked">最多点赞</option></select></div>
           <div class="form-field"><label for="col-publish-time">发布时间</label><select id="col-publish-time"><option value="all">不限</option><option value="day">一天内</option><option value="week">一周内</option><option value="half_year">半年内</option></select></div>
           <div class="form-field"><label for="col-content-type">内容类型</label><select id="col-content-type"><option value="all">全部作品</option><option value="video">视频</option><option value="images">图文 / 图集</option></select></div>
+        </div>
+        <div class="form-field" id="col-duration-wrap">
+          <label for="col-min-duration">视频时长范围 <span class="field-scope">秒 · 可选</span></label>
+          <div class="row duration-range">
+            <input id="col-min-duration" type="number" min="0" max="86400" step="1" inputmode="numeric" placeholder="最短，如 20" aria-label="最短视频时长（秒）" aria-describedby="col-duration-help">
+            <span aria-hidden="true">～</span>
+            <input id="col-max-duration" type="number" min="0" max="86400" step="1" inputmode="numeric" placeholder="最长，如 40" aria-label="最长视频时长（秒）" aria-describedby="col-duration-help">
+          </div>
+          <p class="hint" id="col-duration-help">抖音 / 小红书；包含上下限，留空或 0 表示不限。设置后仅采集时长已知的视频，跳过图文和未知时长。</p>
         </div>
         <details class="collection-advanced">
           <summary>高级停止与数据门槛 <span>可选，减少无效结果</span></summary>
@@ -2559,16 +2573,54 @@
     </div>
   </div>
 
-  <!-- 大模型 API(自动评论文案)-->
-  <div class="card" data-section="ai">
+  </section>
+  <section data-panel="ai-copy" style="display:none">
+  <div class="card" data-section="generate">
+    <div class="card-head">
+      <span class="card-ic"><svg aria-hidden="true"><use href="#i-bolt"/></svg></span>
+      <h2>模板生成文案 <span class="sub">参考结构与语气，写出新的表达</span></h2>
+    </div>
+    <div class="stack">
+      <div class="form-field">
+        <label for="ai-copy-preset">文案模板</label>
+        <select id="ai-copy-preset" onchange="applyAiCopyPreset()">
+          <option value="">自定义模板</option><option value="recommend">好物分享</option><option value="guide">经验攻略</option><option value="daily">日常记录</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="ai-copy-template">参考文案模板 <span class="field-scope">必填</span></label>
+        <textarea id="ai-copy-template" rows="7" maxlength="10000" placeholder="粘贴你喜欢的文案，或先选一个模板。支持换行和表情，例如：&#10;最近发现的宝藏好物 ✨&#10;最喜欢它的三个细节……&#10;你们还有什么推荐？💬" oninput="$('ai-copy-preset').value='';$('ai-copy-preset')._csSync?.()"></textarea>
+        <p class="hint">按模板的结构、语气和排版生成新文案；花括号和 Emoji 可直接输入。</p>
+      </div>
+      <div class="form-field">
+        <label for="ai-copy-instructions">创作要求（可选）</label>
+        <textarea id="ai-copy-instructions" rows="3" maxlength="2000" placeholder="例如：改成秋日露营主题，面向新手，口语化，200 字左右。"></textarea>
+      </div>
+      <label class="switch-row"><input type="checkbox" id="ai-copy-emoji" checked><span class="switch-copy"><b>使用表情</b><span>保留模板表情，并允许自然加入少量 Emoji</span></span></label>
+      <div class="form-actions">
+        <span id="ai-copy-msg" class="status-text" role="status" aria-live="polite">首次使用请先在「模型配置」中保存 AI 接口。</span>
+        <button type="button" id="ai-copy-generate" onclick="generateAiCopy(false)"><svg aria-hidden="true"><use href="#i-bolt"/></svg>生成文案</button>
+      </div>
+      <div class="form-field">
+        <label for="ai-copy-result">生成结果 <span class="field-scope">可直接编辑</span></label>
+        <textarea id="ai-copy-result" rows="9" placeholder="生成的文案显示在这里，支持复制和编辑。" oninput="updateAiCopyActions()"></textarea>
+      </div>
+      <div class="form-actions">
+        <span class="hint">重新生成会替换当前结果；生成失败时保留上一版。</span>
+        <button type="button" class="ghost" id="ai-copy-copy" onclick="copyAiCopy()" disabled><svg aria-hidden="true"><use href="#i-copy"/></svg>复制文案</button>
+        <button type="button" class="ghost" id="ai-copy-refresh" onclick="generateAiCopy(true)" disabled><svg aria-hidden="true"><use href="#i-refresh"/></svg>重新生成</button>
+      </div>
+    </div>
+  </div>
+  <div class="card" data-section="config">
     <div class="card-head">
       <span class="card-ic"><svg><use href="#i-bolt"/></svg></span>
-      <h2>大模型 API <span class="sub">自动评论文案生成(OpenAI 兼容接口)</span></h2>
+      <h2>模型配置 <span class="sub">文案工具与自动评论共用 · OpenAI 兼容接口</span></h2>
     </div>
     <div class="stack">
       <label class="switch-row">
         <input type="checkbox" id="ai-enabled">
-        <span class="switch-copy"><b>启用大模型生成文案</b><span>关闭后只使用规则中的本地模板库</span></span>
+        <span class="switch-copy"><b>自动评论启用大模型</b><span>关闭后自动评论使用规则模板，不影响手动生成文案</span></span>
       </label>
       <div class="form-grid">
         <div class="form-field">
@@ -2594,7 +2646,7 @@
         </div>
       </div>
       <div class="form-field">
-        <label for="ai-prompt">提示词模板</label>
+        <label for="ai-prompt">自动评论提示词模板</label>
         <textarea id="ai-prompt" rows="3" placeholder="留空使用内置提示词"></textarea>
         <div class="field-help">可用变量：{source_text}、{nick}、{kw}、{platform}、{kind_label}</div>
       </div>
@@ -2609,6 +2661,8 @@
       </div>
     </div>
   </div>
+  </section>
+  <section data-panel="settings">
   <div class="card" id="engine-settings-card" data-section="engine">
     <div class="card-head">
       <span class="card-ic"><svg aria-hidden="true"><use href="#i-settings"/></svg></span>
@@ -3585,11 +3639,15 @@
 </div>
 
 <!-- 预览 lightbox -->
-<div id="preview" class="pv-overlay" style="display:none" onclick="if(event.target.id==='preview')hidePreview()" role="dialog" aria-modal="true" aria-label="作品预览">
+<div id="preview" class="pv-overlay" style="display:none" role="dialog" aria-modal="true" aria-label="作品预览">
   <div class="pv-box">
     <button class="pv-close" onclick="hidePreview()" aria-label="关闭预览"><svg><use href="#i-x"/></svg></button>
     <div class="pv-media" id="pv-media"></div>
     <div class="pv-cap" id="pv-cap"></div>
+    <div class="pv-copy-actions" id="pv-copy-actions" hidden>
+      <span class="status-text" id="pv-copy-msg" role="status" aria-live="polite"></span>
+      <button type="button" class="ghost sm" id="pv-copy" onclick="copyPreviewCaption()"><svg aria-hidden="true"><use href="#i-copy"/></svg>复制文案</button>
+    </div>
   </div>
 </div>
 

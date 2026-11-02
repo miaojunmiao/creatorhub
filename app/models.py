@@ -365,6 +365,8 @@ class KeywordCollectionJob(SQLModel, table=True):
     search_sort: str = "general"          # general | latest | most_liked
     publish_time: str = "all"             # all | day | week | half_year
     content_type: str = "all"             # all | video | images
+    min_duration: int = 0                 # 视频时长下限(秒)，0=不限
+    max_duration: int = 0                 # 视频时长上限(秒)，0=不限
     min_likes: int = 0
     min_comments: int = 0
     max_comments_per_content: int = 20
@@ -409,6 +411,7 @@ class KeywordCollectionContent(SQLModel, table=True):
     like_count: int = 0
     comment_count: int = 0                  # 平台显示的评论总数
     collected_comment_count: int = 0        # 本任务实际入库数
+    duration: float = 0                     # 视频时长(秒)，0=未知
     media_json: str = "[]"
     xsec_token: str = ""
     xsec_source: str = ""               # 与搜索结果令牌配套的来源
